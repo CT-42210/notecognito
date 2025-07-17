@@ -1,0 +1,11 @@
+# JetBrains IDEs
+.idea/
+
+# Electron
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+release/
+*.asar
+
