@@ -2,8 +2,7 @@ use anyhow::Result;
 use notecognito_core::{DisplayProperties, NotecardId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use objc2::rc::Retained;
-use objc2::ClassType;
+use objc2::msg_send; // Add this import for msg_send macro
 use dispatch::Queue;
 
 // Simple window info structure
@@ -69,7 +68,6 @@ impl NotecardWindowManager {
         content: &str,
         properties: &DisplayProperties,
     ) -> Result<()> {
-        use dispatch::Queue;
         use objc2_app_kit::{
             NSBackingStoreType, NSColor, NSFont, NSTextField, NSWindow,
             NSWindowStyleMask,
@@ -120,7 +118,6 @@ impl NotecardWindowManager {
                 content_view.setWantsLayer(true);
 
                 if let Some(layer) = content_view.layer() {
-                    use objc2::msg_send;
                     let cg_color: *const std::ffi::c_void = unsafe { msg_send![&bg_color, CGColor] };
                     let _: () = msg_send![&layer, setBackgroundColor: cg_color];
                     let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
@@ -151,21 +148,8 @@ impl NotecardWindowManager {
                 // Show window
                 window.makeKeyAndOrderFront(None);
 
-                // Replace the entire auto-hide section with:
-                if properties.auto_hide_duration > 0 {
-                    let duration = properties.auto_hide_duration as f64;
-                    let window_ptr = window.as_ptr();
-
-                    // Use dispatch to schedule the close operation
-                    Queue::main().exec_after(
-                        std::time::Duration::from_secs_f64(duration),
-                        move || {
-                            unsafe {
-                                let _: () = msg_send![window_ptr, close];
-                            }
-                        }
-                    );
-                }
+                // Timer functionality removed - windows will stay open until manually closed
+            }
         });
 
         Ok(())
