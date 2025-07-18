@@ -2,6 +2,9 @@ use anyhow::Result;
 use notecognito_core::{DisplayProperties, NotecardId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use objc2::rc::Retained;
+use objc2::ClassType;
+use dispatch::Queue;
 
 // Simple window info structure
 #[derive(Clone)]
@@ -78,7 +81,7 @@ impl NotecardWindowManager {
         let font_size = properties.font_size;
 
         // Dispatch to main queue
-        Queue::main().async_barrier(move || {
+        Queue::main().exec_async(move || {
             unsafe {
                 // Try to get main thread marker
                 let mtm = match MainThreadMarker::new() {
@@ -105,7 +108,7 @@ impl NotecardWindowManager {
                 );
 
                 // Configure window
-                window.setLevel(NSWindowLevel::Floating);
+                window.setLevel(3); // Floating window level
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
                 window.setAlphaValue(opacity as CGFloat / 100.0);
@@ -118,7 +121,8 @@ impl NotecardWindowManager {
 
                 if let Some(layer) = content_view.layer() {
                     use objc2::msg_send;
-                    let _: () = msg_send![&layer, setBackgroundColor: bg_color.CGColor()];
+                    let cg_color: *const std::ffi::c_void = unsafe { msg_send![&bg_color, CGColor] };
+                    let _: () = msg_send![&layer, setBackgroundColor: cg_color];
                     let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
                 }
 
@@ -131,9 +135,8 @@ impl NotecardWindowManager {
                 text_field.setTextColor(Some(&NSColor::whiteColor()));
 
                 // Set font
-                if let Some(font) = NSFont::systemFontOfSize(font_size as CGFloat) {
-                    text_field.setFont(Some(&font));
-                }
+                let font = NSFont::systemFontOfSize(font_size as CGFloat);
+                text_field.setFont(Some(&font));
 
                 // Set frame for text field with padding
                 let text_frame = CGRect::new(
@@ -148,16 +151,21 @@ impl NotecardWindowManager {
                 // Show window
                 window.makeKeyAndOrderFront(None);
 
-                // Auto-hide after a delay if configured
+                // Replace the entire auto-hide section with:
                 if properties.auto_hide_duration > 0 {
                     let duration = properties.auto_hide_duration as f64;
-                    Queue::main().after(duration, move || {
-                        window.close();
-                    });
-                }
+                    let window_ptr = window.as_ptr();
 
-                tracing::info!("Created window for notecard {}", notecard_id.value());
-            }
+                    // Use dispatch to schedule the close operation
+                    Queue::main().exec_after(
+                        std::time::Duration::from_secs_f64(duration),
+                        move || {
+                            unsafe {
+                                let _: () = msg_send![window_ptr, close];
+                            }
+                        }
+                    );
+                }
         });
 
         Ok(())

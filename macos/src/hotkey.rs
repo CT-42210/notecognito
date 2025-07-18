@@ -105,8 +105,11 @@ impl HotkeyManager {
             CGEventTapOptions::Default,
             vec![CGEventType::KeyDown],
             |_proxy, event_type, event| {
-                if event_type != CGEventType::KeyDown {
-                    return Some(event.clone());
+                match event_type {
+                    CGEventType::KeyDown => {
+                        // Your existing logic here
+                    }
+                    _ => return Some(event.clone()),
                 }
 
                 // Check if this matches any registered hotkey
