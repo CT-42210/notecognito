@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use notecognito_core::{ConfigManager, NotecardId, PlatformInterface};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{msg_send_id, ClassType};
+use objc2::ClassType;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSStatusBarButton, NSImage, NSEventModifierFlags,
+    NSImage, NSEventModifierFlags,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSBundle, NSData, NSNotificationCenter, NSObject, NSString,
+    MainThreadMarker, NSBundle, NSData, NSString,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -27,20 +27,23 @@ use app_delegate::AppDelegate;
 
 const APP_NAME: &str = "Notecognito";
 
+// Global references for menu items and delegate
+static mut MENU_DELEGATE: Option<Retained<AppDelegate>> = None;
+static mut STATUS_ITEM: Option<Retained<NSStatusItem>> = None;
+
 pub struct App {
     config_manager: Arc<Mutex<ConfigManager>>,
     ipc_client: Arc<Mutex<IpcClient>>,
     hotkey_manager: Arc<Mutex<HotkeyManager>>,
     window_manager: Arc<Mutex<NotecardWindowManager>>,
     platform: Arc<Mutex<MacOSPlatform>>,
-    status_item: Option<Retained<NSStatusItem>>,
 }
 
 impl App {
     async fn new() -> Result<Self> {
         // Initialize logging
         tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(tracing::Level::DEBUG)
             .init();
 
         tracing::info!("Starting Notecognito for macOS");
@@ -71,16 +74,27 @@ impl App {
             hotkey_manager,
             window_manager,
             platform,
-            status_item: None,
         })
     }
 
     async fn initialize(&mut self, mtm: MainThreadMarker) -> Result<()> {
+        tracing::debug!("Initializing app...");
+
         // Set up as menu bar app (no dock icon)
         let app = NSApplication::sharedApplication(mtm);
         unsafe {
             app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         }
+
+        // Create and set app delegate FIRST
+        let delegate = AppDelegate::new(mtm);
+        unsafe {
+            MENU_DELEGATE = Some(delegate.clone());
+            app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        }
+
+        // Create menu bar item AFTER delegate is set
+        self.create_menu_bar_item(mtm)?;
 
         // Try to connect to IPC server
         match self.connect_to_core().await {
@@ -102,17 +116,30 @@ impl App {
             let platform = self.platform.lock().await;
             if !platform.check_permissions()? {
                 tracing::warn!("Accessibility permissions not granted");
-                // The platform will have shown an alert
+                self.show_accessibility_alert(mtm);
             }
         }
 
         // Load configuration and setup hotkeys
         self.load_configuration().await?;
 
-        // Create menu bar item
-        self.create_menu_bar_item(mtm)?;
-
         Ok(())
+    }
+
+    fn show_accessibility_alert(&self, mtm: MainThreadMarker) {
+        use objc2_app_kit::{NSAlert, NSAlertStyle};
+
+        unsafe {
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str("Accessibility Permission Required"));
+            alert.setInformativeText(&NSString::from_str(
+                "Notecognito needs accessibility permissions to register global hotkeys.\n\n\
+                Please grant permission in System Preferences > Security & Privacy > Privacy > Accessibility.\n\n\
+                You may need to restart the app after granting permission."
+            ));
+            alert.setAlertStyle(NSAlertStyle::Warning);
+            alert.runModal();
+        }
     }
 
     async fn connect_to_core(&self) -> Result<()> {
@@ -156,29 +183,35 @@ impl App {
     }
 
     fn create_menu_bar_item(&mut self, mtm: MainThreadMarker) -> Result<()> {
+        tracing::debug!("Creating menu bar item...");
+
         unsafe {
             // Get the status bar
             let status_bar = NSStatusBar::systemStatusBar();
 
-            // Create status item
+            // Create status item with variable length
             let status_item = status_bar.statusItemWithLength(-1.0); // NSVariableStatusItemLength
 
             // Set icon
             if let Some(button) = status_item.button(mtm) {
-                // Try to load icon from bundle
+                // Try to load icon from bundle first
                 if let Some(icon) = Self::load_icon(mtm) {
                     button.setImage(Some(&icon));
+                    button.setToolTip(Some(&NSString::from_str("Notecognito")));
                 } else {
                     // Fallback to text
                     button.setTitle(&NSString::from_str("N"));
                 }
             }
 
-            // Create menu
+            // Create menu with proper delegate target
             let menu = Self::create_menu(mtm);
             status_item.setMenu(Some(&menu));
 
-            self.status_item = Some(status_item);
+            // Store status item globally
+            STATUS_ITEM = Some(status_item);
+
+            tracing::info!("Menu bar item created successfully");
         }
 
         Ok(())
@@ -186,19 +219,35 @@ impl App {
 
     fn load_icon(mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
         unsafe {
-            // Try to load from app bundle
+            // Try multiple ways to load the icon
+
+            // 1. Try from app bundle resources
             let bundle = NSBundle::mainBundle();
-            if let Some(path) = bundle.pathForResource_ofType(Some(&NSString::from_str("icon")), Some(&NSString::from_str("png"))) {
-                NSImage::initWithContentsOfFile(NSImage::alloc(), &path)
-            } else {
-                // Try to load embedded icon
-                let icon_data = include_bytes!("../assets/icon.png");
-                let data = NSData::dataWithBytes_length(
-                    icon_data.as_ptr() as *mut std::ffi::c_void,
-                    icon_data.len(),
-                );
-                NSImage::initWithData(NSImage::alloc(), &data)
+            if let Some(path) = bundle.pathForResource_ofType(
+                Some(&NSString::from_str("icon")),
+                Some(&NSString::from_str("png"))
+            ) {
+                if let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &path) {
+                    // Set template image for proper menu bar styling
+                    let _: () = objc2::msg_send![&image, setTemplate: true];
+                    return Some(image);
+                }
             }
+
+            // 2. Try embedded icon data
+            let icon_data = include_bytes!("../assets/icon.png");
+            let data = NSData::dataWithBytes_length(
+                icon_data.as_ptr() as *mut std::ffi::c_void,
+                icon_data.len(),
+            );
+
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                // Set template image
+                let _: () = objc2::msg_send![&image, setTemplate: true];
+                return Some(image);
+            }
+
+            None
         }
     }
 
@@ -206,12 +255,14 @@ impl App {
         unsafe {
             let menu = NSMenu::new(mtm);
 
+            // Get delegate reference
+            let delegate = MENU_DELEGATE.as_ref().unwrap();
+
             // Configure item
             let configure_item = NSMenuItem::new(mtm);
             configure_item.setTitle(&NSString::from_str("Configure..."));
             configure_item.setAction(Some(objc2::sel!(configure:)));
-            // Set target to nil for now - will be set when delegate is created
-            configure_item.setTarget(None);
+            configure_item.setTarget(Some(delegate)); // Set proper target
             menu.addItem(&configure_item);
 
             // Separator
@@ -221,16 +272,15 @@ impl App {
             let about_item = NSMenuItem::new(mtm);
             about_item.setTitle(&NSString::from_str("About Notecognito"));
             about_item.setAction(Some(objc2::sel!(about:)));
-            // Set target to nil for now - will be set when delegate is created
-            about_item.setTarget(None);
+            about_item.setTarget(Some(delegate)); // Set proper target
             menu.addItem(&about_item);
 
             // Separator
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-            // Quit item
+            // Quit item (this targets the app, not the delegate)
             let quit_item = NSMenuItem::new(mtm);
-            quit_item.setTitle(&NSString::from_str("Quit"));
+            quit_item.setTitle(&NSString::from_str("Quit Notecognito"));
             quit_item.setAction(Some(objc2::sel!(terminate:)));
             quit_item.setKeyEquivalent(&NSString::from_str("q"));
             quit_item.setKeyEquivalentModifierMask(NSEventModifierFlags::NSEventModifierFlagCommand);
@@ -243,18 +293,19 @@ impl App {
     async fn run(&mut self) -> Result<()> {
         // Set up hotkey callback
         let config_manager = Arc::clone(&self.config_manager);
+        let window_manager = Arc::clone(&self.window_manager);
 
         let callback = move |notecard_id: NotecardId| {
-            let config_manager = Arc::clone(&config_manager);
+            tracing::info!("Hotkey pressed for notecard {}", notecard_id.value());
 
-            // Use a blocking approach instead of tokio::spawn to avoid thread safety issues
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async move {
-                    if let Err(e) = show_notecard_blocking(notecard_id, config_manager).await {
-                        tracing::error!("Failed to show notecard: {}", e);
-                    }
-                });
+            let config_manager = Arc::clone(&config_manager);
+            let window_manager = Arc::clone(&window_manager);
+
+            // Show notecard in a separate task
+            tokio::spawn(async move {
+                if let Err(e) = show_notecard(notecard_id, config_manager, window_manager).await {
+                    tracing::error!("Failed to show notecard: {}", e);
+                }
             });
         };
 
@@ -264,6 +315,7 @@ impl App {
             hotkey_manager.start_monitoring(callback)?;
         }
 
+        tracing::info!("Hotkey monitoring started");
         Ok(())
     }
 }
@@ -271,31 +323,20 @@ impl App {
 async fn show_notecard(
     notecard_id: NotecardId,
     config_manager: Arc<Mutex<ConfigManager>>,
-    window_manager: Arc<Mutex<NotecardWindowManager>>,
+    _window_manager: Arc<Mutex<NotecardWindowManager>>,
 ) -> Result<()> {
     let manager = config_manager.lock().await;
 
     if let Some(notecard) = manager.get_notecard(notecard_id) {
         if !notecard.content.is_empty() {
-            let properties = &manager.config().default_display_properties;
-            let mut window_manager = window_manager.lock().await;
-            window_manager.show_notecard(notecard_id, &notecard.content, properties)?;
-        }
-    }
+            let _properties = &manager.config().default_display_properties;
 
-    Ok(())
-}
+            // For now, just log that we would show the notecard
+            tracing::info!("Would show notecard {}: {}", notecard_id.value(), notecard.content);
 
-async fn show_notecard_blocking(
-    notecard_id: NotecardId,
-    config_manager: Arc<Mutex<ConfigManager>>,
-) -> Result<()> {
-    let manager = config_manager.lock().await;
-
-    if let Some(notecard) = manager.get_notecard(notecard_id) {
-        if !notecard.content.is_empty() {
-            // Blocking display logic here
-            println!("Showing notecard {}: {}", notecard_id.value(), notecard.content);
+            // TODO: Implement actual window display
+            // let mut window_manager = window_manager.lock().await;
+            // window_manager.show_notecard(notecard_id, &notecard.content, properties)?;
         }
     }
 
@@ -303,33 +344,53 @@ async fn show_notecard_blocking(
 }
 
 pub fn launch_config_ui() {
-    // Launch the Electron configuration UI
-    let config_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .map(|p| p.join("Notecognito Config.app/Contents/MacOS/Notecognito Config"))
-        .unwrap_or_else(|| "open -a 'Notecognito Config'".into());
+    tracing::info!("Launching configuration UI...");
 
-    if config_path.to_string_lossy().starts_with("open") {
-        // Use open command
-        if let Err(e) = std::process::Command::new("open")
-            .args(&["-a", "Notecognito Config"])
-            .spawn()
-        {
-            tracing::error!("Failed to launch config UI: {}", e);
-        }
-    } else {
-        // Direct launch
-        if let Err(e) = std::process::Command::new(&config_path).spawn() {
-            tracing::error!("Failed to launch config UI: {}", e);
+    // Try multiple approaches to launch the config UI
+
+    // 1. First try using 'open' command with app name
+    let result = std::process::Command::new("open")
+        .args(&["-a", "Notecognito Config"])
+        .spawn();
+
+    if result.is_ok() {
+        return;
+    }
+
+    // 2. Try looking in the same directory as our executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let config_app = parent.join("Notecognito Config.app");
+            if config_app.exists() {
+                if let Ok(_) = std::process::Command::new("open")
+                    .arg(config_app)
+                    .spawn()
+                {
+                    return;
+                }
+            }
         }
     }
+
+    // 3. Try Applications folder
+    let apps_path = "/Applications/Notecognito Config.app";
+    if std::path::Path::new(apps_path).exists() {
+        if let Ok(_) = std::process::Command::new("open")
+            .arg(apps_path)
+            .spawn()
+        {
+            return;
+        }
+    }
+
+    tracing::error!("Failed to launch configuration UI - app not found");
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Get main thread marker
-    let mtm = MainThreadMarker::new().unwrap();
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| anyhow::anyhow!("Must be run on main thread"))?;
 
     // Create app instance
     let mut app = App::new().await?;
@@ -337,19 +398,13 @@ async fn main() -> Result<()> {
     // Initialize on main thread
     app.initialize(mtm).await?;
 
-    // Create and set app delegate
-    let delegate = AppDelegate::new(mtm);
-    unsafe {
-        let ns_app = NSApplication::sharedApplication(mtm);
-        ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    }
-
     // Start async tasks
     app.run().await?;
 
     // Run the main event loop
     unsafe {
         let ns_app = NSApplication::sharedApplication(mtm);
+        tracing::info!("Starting NSApplication run loop");
         ns_app.run();
     }
 

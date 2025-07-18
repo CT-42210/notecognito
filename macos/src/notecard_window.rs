@@ -1,140 +1,165 @@
 use anyhow::Result;
 use notecognito_core::{DisplayProperties, NotecardId};
-use objc2::rc::Retained;
-use objc2::{msg_send, msg_send_id};
-use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSFont, NSTextField,
-    NSView, NSWindow, NSWindowLevel, NSWindowStyleMask,
-    NSWindowCollectionBehavior,
-};
-use objc2_foundation::{
-    CGFloat, CGPoint, CGRect, CGSize, MainThreadMarker, NSString, NSTimer,
-};
-use std::collections::HashMap;
-use std::ptr::NonNull;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-// Thread-safe wrapper for NotecardWindow
-pub struct NotecardWindow {
-    // We'll store just the identifier and recreate windows as needed
+// Simple window info structure
+#[derive(Clone)]
+pub struct NotecardWindowInfo {
     notecard_id: NotecardId,
-    is_visible: bool,
+    content: String,
+    properties: DisplayProperties,
 }
-
-// Make NotecardWindow Send + Sync by removing the NSWindow fields
-unsafe impl Send for NotecardWindow {}
-unsafe impl Sync for NotecardWindow {}
 
 pub struct NotecardWindowManager {
-    windows: HashMap<NotecardId, NotecardWindow>,
+    // Store window info for display on the main thread
+    pending_windows: Arc<Mutex<Vec<NotecardWindowInfo>>>,
 }
 
-// Make NotecardWindowManager Send + Sync
 unsafe impl Send for NotecardWindowManager {}
 unsafe impl Sync for NotecardWindowManager {}
 
 impl NotecardWindowManager {
     pub fn new() -> Self {
         NotecardWindowManager {
-            windows: HashMap::new(),
+            pending_windows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn show_notecard(
+    pub async fn show_notecard(
         &mut self,
         notecard_id: NotecardId,
         content: &str,
         properties: &DisplayProperties,
     ) -> Result<()> {
-        // Hide existing window if any
-        self.hide_notecard(notecard_id)?;
+        // For now, just store the window info
+        // The actual window creation needs to happen on the main thread
+        let window_info = NotecardWindowInfo {
+            notecard_id,
+            content: content.to_string(),
+            properties: properties.clone(),
+        };
 
-        // Create window on main thread
-        let mtm = MainThreadMarker::new()
-            .ok_or_else(|| anyhow::anyhow!("Not on main thread"))?;
+        // Add to pending windows
+        let mut pending = self.pending_windows.lock().await;
+        pending.push(window_info);
 
-        // Create the window
-        let window = self.create_notecard_window(mtm, notecard_id, content, properties)?;
-
-        // Store window
-        self.windows.insert(notecard_id, window);
+        // In a real implementation, we would signal the main thread to create the window
+        // For now, let's use dispatch to create a basic window
+        self.create_window_on_main_thread(notecard_id, content, properties)?;
 
         Ok(())
     }
 
-    pub fn hide_notecard(&mut self, notecard_id: NotecardId) -> Result<()> {
-        if let Some(notecard) = self.windows.remove(&notecard_id) {
-            // For now, just remove from our tracking
-            // Actual window cleanup would be handled on the main thread
-        }
+    pub async fn hide_notecard(&mut self, notecard_id: NotecardId) -> Result<()> {
+        // Remove from pending if exists
+        let mut pending = self.pending_windows.lock().await;
+        pending.retain(|w| w.notecard_id != notecard_id);
+
+        // In a real implementation, we would close the window here
         Ok(())
     }
 
-    fn create_notecard_window(
+    fn create_window_on_main_thread(
         &self,
-        mtm: MainThreadMarker,
         notecard_id: NotecardId,
         content: &str,
         properties: &DisplayProperties,
-    ) -> Result<NotecardWindow> {
-        // For now, just create a simple representation
-        // The actual window creation will be handled differently due to thread safety
-        Ok(NotecardWindow {
-            notecard_id,
-            is_visible: true,
-        })
-    }
-}
+    ) -> Result<()> {
+        use dispatch::Queue;
+        use objc2_app_kit::{
+            NSBackingStoreType, NSColor, NSFont, NSTextField, NSWindow,
+            NSWindowStyleMask,
+        };
+        use objc2_foundation::{CGFloat, CGPoint, CGRect, CGSize, MainThreadMarker, NSString};
 
-// Temporarily comment out the delegate implementation to fix thread safety issues
-/*
-use objc2::runtime::ProtocolObject;
-use objc2::{declare_class, mutability, DeclaredClass};
-use objc2_app_kit::{NSWindowDelegate, NSResponder};
+        let content = content.to_string();
+        let opacity = properties.opacity;
+        let font_size = properties.font_size;
 
-declare_class!(
-    struct NotecardWindowDelegate {
-        window: Retained<NSWindow>,
-    }
+        // Dispatch to main queue
+        Queue::main().async_barrier(move || {
+            unsafe {
+                // Try to get main thread marker
+                let mtm = match MainThreadMarker::new() {
+                    Some(m) => m,
+                    None => {
+                        tracing::error!("Not on main thread for window creation");
+                        return;
+                    }
+                };
 
-    unsafe impl ClassType for NotecardWindowDelegate {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "NotecardWindowDelegate";
-    }
+                // Create window frame
+                let frame = CGRect::new(
+                    CGPoint::new(200.0, 200.0),
+                    CGSize::new(400.0, 200.0),
+                );
 
-    impl DeclaredClass for NotecardWindowDelegate {
-        type Ivars = StdMutex<Option<Retained<NSWindow>>>;
-    }
+                // Create window
+                let window = NSWindow::initWithContentRect_styleMask_backing_defer(
+                    mtm.alloc::<NSWindow>(),
+                    frame,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::NSBackingStoreBuffered,
+                    false,
+                );
 
-    unsafe impl NSObjectProtocol for NotecardWindowDelegate {}
+                // Configure window
+                window.setLevel(NSWindowLevel::Floating);
+                window.setOpaque(false);
+                window.setBackgroundColor(Some(&NSColor::clearColor()));
+                window.setAlphaValue(opacity as CGFloat / 100.0);
+                window.setHasShadow(true);
 
-    unsafe impl NSWindowDelegate for NotecardWindowDelegate {}
+                // Create background view
+                let content_view = window.contentView().unwrap();
+                let bg_color = NSColor::colorWithWhite_alpha(0.1, 0.9);
+                content_view.setWantsLayer(true);
 
-    unsafe impl NotecardWindowDelegate {
-        #[method(mouseDown:)]
-        fn mouse_down(&self, _event: &NSEvent) {
-            if let Some(window) = self.ivars().lock().unwrap().as_ref() {
-                window.close();
-            }
-        }
-
-        #[method(keyDown:)]
-        fn key_down(&self, event: &NSEvent) {
-            // Check for Escape key (keyCode 53)
-            if event.keyCode() == 53 {
-                if let Some(window) = self.ivars().lock().unwrap().as_ref() {
-                    window.close();
+                if let Some(layer) = content_view.layer() {
+                    use objc2::msg_send;
+                    let _: () = msg_send![&layer, setBackgroundColor: bg_color.CGColor()];
+                    let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
                 }
-            }
-        }
-    }
-);
 
-impl NotecardWindowDelegate {
-    fn new(mtm: MainThreadMarker, window: Retained<NSWindow>) -> Retained<Self> {
-        let this = unsafe { msg_send_id![mtm.alloc::<Self>(), init] };
-        *this.ivars().lock().unwrap() = Some(window);
-        this
+                // Create text field
+                let text_field = NSTextField::new(mtm);
+                text_field.setStringValue(&NSString::from_str(&content));
+                text_field.setEditable(false);
+                text_field.setBordered(false);
+                text_field.setDrawsBackground(false);
+                text_field.setTextColor(Some(&NSColor::whiteColor()));
+
+                // Set font
+                if let Some(font) = NSFont::systemFontOfSize(font_size as CGFloat) {
+                    text_field.setFont(Some(&font));
+                }
+
+                // Set frame for text field with padding
+                let text_frame = CGRect::new(
+                    CGPoint::new(20.0, 20.0),
+                    CGSize::new(360.0, 160.0),
+                );
+                text_field.setFrame(text_frame);
+
+                // Add text field to window
+                content_view.addSubview(&text_field);
+
+                // Show window
+                window.makeKeyAndOrderFront(None);
+
+                // Auto-hide after a delay if configured
+                if properties.auto_hide_duration > 0 {
+                    let duration = properties.auto_hide_duration as f64;
+                    Queue::main().after(duration, move || {
+                        window.close();
+                    });
+                }
+
+                tracing::info!("Created window for notecard {}", notecard_id.value());
+            }
+        });
+
+        Ok(())
     }
 }
-*/

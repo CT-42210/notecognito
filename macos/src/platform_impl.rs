@@ -1,9 +1,6 @@
-use anyhow::Result;
 use notecognito_core::{
     DisplayProperties, HotkeyModifier, NotecardId, PlatformInterface,
 };
-use objc2_app_kit::{NSAlert, NSAlertStyle, NSModalResponse};
-use objc2_foundation::{MainThreadMarker, NSString};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use core_foundation::string::CFStringRef;
@@ -76,7 +73,7 @@ impl PlatformInterface for MacOSPlatform {
         let result = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 let mut manager = window_manager.lock().await;
-                manager.show_notecard(id, &content, &properties)
+                manager.show_notecard(id, &content, &properties).await
             })
         });
 
@@ -89,7 +86,7 @@ impl PlatformInterface for MacOSPlatform {
         let result = tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 let mut manager = window_manager.lock().await;
-                manager.hide_notecard(id)
+                manager.hide_notecard(id).await
             })
         });
 
@@ -98,7 +95,7 @@ impl PlatformInterface for MacOSPlatform {
 
     fn set_launch_on_startup(&mut self, enabled: bool) -> notecognito_core::Result<()> {
         use core_foundation::array::CFArray;
-        use core_foundation::base::{Boolean, CFType, TCFType};
+        use core_foundation::base::{CFType, TCFType};
         use core_foundation::string::CFString;
         use core_foundation::url::CFURL;
         use std::ptr;

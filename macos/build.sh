@@ -134,17 +134,14 @@ if ! nc -z localhost 7855 2>/dev/null; then
     echo ""
 fi
 
-# Ask if user wants to run
-read -p "Do you want to run Notecognito now? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "Starting Notecognito..."
-    open "$BUNDLE_PATH"
-fi
-
 echo ""
 echo "To install:"
 echo "  1. Copy $BUNDLE_PATH to /Applications"
 echo "  2. Grant accessibility permissions when prompted"
 echo "  3. Run from Applications or Launchpad"
+echo ""
+echo "IMPORTANT: Accessibility permissions required!"
+echo "1. Open System Preferences > Security & Privacy > Privacy > Accessibility"
+echo "2. Add Notecognito to the list (click + button)"
+echo "3. Ensure the checkbox is checked"
 echo ""
