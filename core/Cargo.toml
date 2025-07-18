@@ -1,0 +1,26 @@
+[package]
+name = "notecognito-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+ffi = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+thiserror = "1.0"
+dirs = "5.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+
+[lib]
+name = "notecognito_core"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "notecognito-ipc-server"
+path = "src/bin/ipc_server.rs"

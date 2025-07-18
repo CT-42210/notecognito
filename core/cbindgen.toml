@@ -1,0 +1,30 @@
+# cbindgen configuration for generating C headers
+
+language = "C"
+
+[export]
+# Only export functions marked with #[no_mangle]
+item_types = ["functions"]
+
+# Include guard
+include_guard = "NOTECOGNITO_H"
+
+# Header to prepend to generated file
+header = """
+/*
+ * Notecognito Core Library C API
+ * Auto-generated header file
+ */
+"""
+
+# Include standard headers
+includes = ["stdbool.h", "stdint.h"]
+
+[enum]
+# How to generate enums
+rename_variants = "ScreamingSnakeCase"
+
+[fn]
+# Function configuration
+prefix = "notecognito_"
+rename_args = "snake_case"
