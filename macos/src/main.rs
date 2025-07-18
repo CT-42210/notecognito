@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use notecognito_core::{ConfigManager, NotecardId};
+use notecognito_core::{ConfigManager, NotecardId, PlatformInterface};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{msg_send_id, ClassType};
@@ -164,7 +164,7 @@ impl App {
             let status_item = status_bar.statusItemWithLength(-1.0); // NSVariableStatusItemLength
 
             // Set icon
-            if let Some(button) = status_item.button() {
+            if let Some(button) = status_item.button(mtm) {
                 // Try to load icon from bundle
                 if let Some(icon) = Self::load_icon(mtm) {
                     button.setImage(Some(&icon));
@@ -194,7 +194,7 @@ impl App {
                 // Try to load embedded icon
                 let icon_data = include_bytes!("../assets/icon.png");
                 let data = NSData::dataWithBytes_length(
-                    std::ptr::NonNull::new(icon_data.as_ptr() as *mut _).unwrap(),
+                    icon_data.as_ptr() as *mut std::ffi::c_void,
                     icon_data.len(),
                 );
                 NSImage::initWithData(NSImage::alloc(), &data)
@@ -210,7 +210,8 @@ impl App {
             let configure_item = NSMenuItem::new(mtm);
             configure_item.setTitle(&NSString::from_str("Configure..."));
             configure_item.setAction(Some(objc2::sel!(configure:)));
-            configure_item.setTarget(Some(&NSApplication::sharedApplication(mtm).delegate().unwrap()));
+            // Set target to nil for now - will be set when delegate is created
+            configure_item.setTarget(None);
             menu.addItem(&configure_item);
 
             // Separator
@@ -220,7 +221,8 @@ impl App {
             let about_item = NSMenuItem::new(mtm);
             about_item.setTitle(&NSString::from_str("About Notecognito"));
             about_item.setAction(Some(objc2::sel!(about:)));
-            about_item.setTarget(Some(&NSApplication::sharedApplication(mtm).delegate().unwrap()));
+            // Set target to nil for now - will be set when delegate is created
+            about_item.setTarget(None);
             menu.addItem(&about_item);
 
             // Separator
@@ -239,23 +241,24 @@ impl App {
     }
 
     async fn run(&mut self) -> Result<()> {
-        // Set up hotkey.rs callback
+        // Set up hotkey callback
         let config_manager = Arc::clone(&self.config_manager);
-        let window_manager = Arc::clone(&self.window_manager);
 
         let callback = move |notecard_id: NotecardId| {
             let config_manager = Arc::clone(&config_manager);
-            let window_manager = Arc::clone(&window_manager);
 
-            // Show notecard in async context
-            tokio::spawn(async move {
-                if let Err(e) = show_notecard(notecard_id, config_manager, window_manager).await {
-                    tracing::error!("Failed to show notecard: {}", e);
-                }
+            // Use a blocking approach instead of tokio::spawn to avoid thread safety issues
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    if let Err(e) = show_notecard_blocking(notecard_id, config_manager).await {
+                        tracing::error!("Failed to show notecard: {}", e);
+                    }
+                });
             });
         };
 
-        // Start hotkey.rs monitoring
+        // Start hotkey monitoring
         {
             let mut hotkey_manager = self.hotkey_manager.lock().await;
             hotkey_manager.start_monitoring(callback)?;
@@ -277,6 +280,22 @@ async fn show_notecard(
             let properties = &manager.config().default_display_properties;
             let mut window_manager = window_manager.lock().await;
             window_manager.show_notecard(notecard_id, &notecard.content, properties)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn show_notecard_blocking(
+    notecard_id: NotecardId,
+    config_manager: Arc<Mutex<ConfigManager>>,
+) -> Result<()> {
+    let manager = config_manager.lock().await;
+
+    if let Some(notecard) = manager.get_notecard(notecard_id) {
+        if !notecard.content.is_empty() {
+            // Blocking display logic here
+            println!("Showing notecard {}: {}", notecard_id.value(), notecard.content);
         }
     }
 

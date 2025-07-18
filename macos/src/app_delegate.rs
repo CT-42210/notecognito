@@ -1,5 +1,5 @@
 use objc2::rc::Retained;
-use objc2::{declare_class, msg_send, mutability, ClassType, DeclaredClass};
+use objc2::{declare_class, msg_send, mutability, msg_send_id, ClassType, DeclaredClass};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol};
 
@@ -44,7 +44,7 @@ declare_class!(
             tracing::info!("About menu item clicked");
             unsafe {
                 let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-                msg_send![&app, orderFrontStandardAboutPanel: self];
+                let _: () = msg_send![&app, orderFrontStandardAboutPanel: self];
             }
         }
     }

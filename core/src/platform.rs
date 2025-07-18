@@ -11,7 +11,7 @@ pub enum HotkeyModifier {
     Shift,
     #[cfg(target_os = "macos")]
     Command,
-    #[cfg(target_os = "win")]
+    #[cfg(target_os = "windows")]
     Windows,
 }
 
@@ -39,7 +39,7 @@ impl HotkeyModifier {
             }
             #[cfg(target_os = "macos")]
             HotkeyModifier::Command => "⌘ Command",
-            #[cfg(target_os = "win")]
+            #[cfg(target_os = "windows")]
             HotkeyModifier::Windows => "⊞ Win",
         }
     }
@@ -79,10 +79,10 @@ pub trait PlatformInterface: Send + Sync {
 pub fn current_platform() -> &'static str {
     #[cfg(target_os = "macos")]
     return "macos";
-    #[cfg(target_os = "win")]
+    #[cfg(target_os = "windows")]
     return "win";
     #[cfg(target_os = "linux")]
     return "linux";
-    #[cfg(not(any(target_os = "macos", target_os = "win", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return "unknown";
 }
