@@ -1,7 +1,7 @@
 use std::env;
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
+    if env::var("CARGO_CFG_TARGET_OS").unwrap() == "win" {
         // Configure Windows resources
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/icon.ico")
