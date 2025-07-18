@@ -45,7 +45,13 @@ function createWindow() {
           click: () => mainWindow.webContents.send('menu-save')
         },
         { type: 'separator' },
-        { role: 'quit' }
+        {
+          label: 'Quit',
+          accelerator: process.platform === 'darwin' ? 'Cmd+Q' : 'Ctrl+Q',
+          click: () => {
+            quitApp();
+          }
+        }
       ]
     },
     {
@@ -97,13 +103,46 @@ function createWindow() {
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { role: 'quit' }
+        {
+          label: 'Quit ' + app.getName(),
+          accelerator: 'Command+Q',
+          click: () => {
+            quitApp();
+          }
+        }
       ]
     });
   }
 
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
+
+  // Set up custom dock menu on macOS
+  if (process.platform === 'darwin') {
+    const dockMenu = Menu.buildFromTemplate([
+      {
+        label: 'Quit ' + app.getName(),
+        click: () => {
+          quitApp();
+        }
+      }
+    ]);
+    app.dock.setMenu(dockMenu);
+  }
+
+  // Handle window close event
+  mainWindow.on('close', (event) => {
+    if (process.platform === 'darwin') {
+      // On macOS, hide the window instead of closing unless we're quitting the app
+      if (!app.isQuitting) {
+        event.preventDefault();
+        mainWindow.hide();
+        return false;
+      }
+    }
+    // Allow the window to close
+    return true;
+  });
 
   // Cleanup on window close
   mainWindow.on('closed', () => {
@@ -114,6 +153,12 @@ function createWindow() {
     }
   });
 }
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    quitApp();
+  }
+});
 
 // IPC Client for communicating with Rust core
 class IpcClient {
@@ -283,19 +328,62 @@ app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    app.quit();
+    quitApp();
   }
 });
 
 app.on('activate', () => {
   if (mainWindow === null) {
     createWindow();
+  } else if (process.platform === 'darwin') {
+    // On macOS, show the window when clicking the dock icon
+    mainWindow.show();
   }
 });
 
-// Handle app shutdown gracefully
-app.on('before-quit', () => {
-  if (ipcClient) {
-    ipcClient.destroy();
+// Override all quit events to use our custom handler
+app.on('before-quit', (event) => {
+  console.log('before-quit event triggered');
+  if (!app.isQuitting) {
+    event.preventDefault();
+    quitApp();
   }
 });
+
+app.on('will-quit', (event) => {
+  console.log('will-quit event triggered');
+  if (!app.isQuitting) {
+    event.preventDefault();
+    quitApp();
+  }
+});
+
+// Proper quit function that ensures clean shutdown
+function quitApp() {
+  console.log('Quitting application...');
+  app.isQuitting = true;
+
+  // Close IPC connection first
+  if (ipcClient) {
+    console.log('Closing IPC connection...');
+    ipcClient.destroy();
+    ipcClient = null;
+  }
+
+  // Close window if it exists
+  if (mainWindow) {
+    console.log('Closing main window...');
+    mainWindow.destroy();
+    mainWindow = null;
+  }
+
+  // Force quit the app
+  console.log('Forcing app quit...');
+  app.quit();
+
+  // If app.quit() doesn't work, force exit
+  setTimeout(() => {
+    console.log('Force exiting process...');
+    process.exit(0);
+  }, 1000);
+}

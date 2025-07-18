@@ -1,59 +1,33 @@
-# JetBrains IDEs
-.idea/
-
-# Electron
-node_modules/
-npm-debug.log
-yarn-error.log
-dist/
-release/
-*.asar
-
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
 
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
+# Temporary files
+~$*.docx
+*.tmp
 
-# Linux
-*~
+# JetBrains IDEs
+.idea/
 
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Node.js
+# Node / Electron
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# Logs
-logs/
-*.log
-
-# Environment variables
-.env
-
-# Build directories
-build/
 dist/
+build/
+.electron/
+app/dist/
 
-# Temporary files
-*.tmp
-*.temp
+# Rust
+/core/target/
+/core/Cargo.lock
 
-# Compiled code
-*.class
+# Build artifacts
+*.node
+*.dylib
+*.so
+*.dll
 
-# Backup files
-*.bak
-
-# Microsoft Office
-~$*.docx
+/app/package-lock.json

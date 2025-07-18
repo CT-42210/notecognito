@@ -1,143 +1,80 @@
-/**
- * Test script to verify IPC connection to Rust core
- * Run with: node test-ipc.js
- */
-
 const net = require('net');
 
-const IPC_PORT = 7855;
-const IPC_HOST = '127.0.0.1';
+const HOST = '127.0.0.1';
+const PORT = 7855;
 
-class TestIpcClient {
-  constructor() {
-    this.socket = new net.Socket();
-    this.connected = false;
-  }
+const client = new net.Socket();
 
-  connect() {
-    return new Promise((resolve, reject) => {
-      console.log(`Connecting to ${IPC_HOST}:${IPC_PORT}...`);
+let receiveBuffer = Buffer.alloc(0);
 
-      this.socket.connect(IPC_PORT, IPC_HOST, () => {
-        console.log('✓ Connected to IPC server');
-        this.connected = true;
-        resolve();
-      });
+function sendMessage(type, payload = {}) {
+  const message = {
+    id: Date.now().toString(),
+    type: type,
+    ...payload,
+  };
+  const jsonMessage = JSON.stringify(message);
+  const messageBuffer = Buffer.from(jsonMessage, 'utf8');
 
-      this.socket.on('data', (data) => {
-        // Parse length-prefixed message
-        let offset = 0;
-        while (offset < data.length) {
-          const messageLength = data.readUInt32LE(offset);
-          const messageData = data.slice(offset + 4, offset + 4 + messageLength);
-          const message = JSON.parse(messageData.toString());
-          console.log('← Received:', JSON.stringify(message, null, 2));
-          offset += 4 + messageLength;
-        }
-      });
+  // Create a 4-byte length prefix (little-endian)
+  const lengthBuffer = Buffer.alloc(4);
+  lengthBuffer.writeUInt32LE(messageBuffer.length, 0);
 
-      this.socket.on('error', (err) => {
-        console.error('✗ Connection error:', err.message);
-        reject(err);
-      });
+  // Send length prefix + message
+  client.write(Buffer.concat([lengthBuffer, messageBuffer]));
+  console.log('→ Sending:', jsonMessage);
+}
 
-      this.socket.on('close', () => {
-        console.log('Connection closed');
-        this.connected = false;
-      });
+function processBuffer() {
+  while (true) {
+    // Need at least 4 bytes for the length prefix
+    if (receiveBuffer.length < 4) {
+      return;
+    }
 
-      setTimeout(() => {
-        if (!this.connected) {
-          reject(new Error('Connection timeout'));
-        }
-      }, 5000);
-    });
-  }
+    const messageLength = receiveBuffer.readUInt32LE(0);
+    const totalLength = 4 + messageLength;
 
-  sendMessage(message) {
-    return new Promise((resolve, reject) => {
-      if (!this.connected) {
-        reject(new Error('Not connected'));
-        return;
-      }
+    // Check if the full message has been received
+    if (receiveBuffer.length < totalLength) {
+      return;
+    }
 
-      console.log('→ Sending:', JSON.stringify(message, null, 2));
+    // Extract and parse the JSON message
+    const messageJson = receiveBuffer.subarray(4, totalLength).toString('utf8');
+    try {
+      const message = JSON.parse(messageJson);
+      console.log('← Received:', message);
+    } catch (e) {
+      console.error('Error parsing JSON:', e);
+      console.error('Invalid JSON string:', messageJson);
+    }
 
-      const jsonData = JSON.stringify(message);
-      const buffer = Buffer.alloc(4 + jsonData.length);
-      buffer.writeUInt32LE(jsonData.length, 0);
-      buffer.write(jsonData, 4);
 
-      this.socket.write(buffer, (err) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  close() {
-    this.socket.destroy();
+    // Remove the processed message from the buffer
+    receiveBuffer = receiveBuffer.subarray(totalLength);
   }
 }
 
-// Run tests
-async function runTests() {
-  const client = new TestIpcClient();
+client.connect(PORT, HOST, () => {
+  console.log(`Connected to IPC server at ${HOST}:${PORT}`);
+  console.log('--- Test 1: Connection successful ---');
 
-  try {
-    // Test 1: Connect to server
-    await client.connect();
-    console.log('\n--- Test 1: Connection successful ---\n');
+  // Test getting configuration
+  console.log('\n--- Test 2: Getting configuration ---');
+  sendMessage('GetConfiguration');
+});
 
-    // Test 2: Get configuration
-    console.log('--- Test 2: Getting configuration ---');
-    await client.sendMessage({
-      id: Date.now().toString(),
-      type: 'GetConfiguration'
-    });
+client.on('data', (chunk) => {
+  // Append new data to the buffer and try to process it
+  receiveBuffer = Buffer.concat([receiveBuffer, chunk]);
+  processBuffer();
+});
 
-    // Wait for response
-    await new Promise(resolve => setTimeout(resolve, 1000));
+client.on('close', () => {
+  console.log('Connection closed');
+});
 
-    // Test 3: Update a notecard
-    console.log('\n--- Test 3: Updating notecard ---');
-    await client.sendMessage({
-      id: (Date.now() + 1).toString(),
-      type: 'UpdateNotecard',
-      notecard: {
-        id: 1,
-        content: 'Test notecard content from IPC test script!'
-      }
-    });
-
-    // Wait for response
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Test 4: Save configuration
-    console.log('\n--- Test 4: Saving configuration ---');
-    await client.sendMessage({
-      id: (Date.now() + 2).toString(),
-      type: 'GetConfiguration'
-    });
-
-    // Wait a bit more to see final response
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    console.log('\n✓ All tests completed successfully!');
-
-  } catch (error) {
-    console.error('\n✗ Test failed:', error.message);
-    console.error('\nMake sure the Rust IPC server is running:');
-    console.error('  cd notecognito-core');
-    console.error('  cargo run --bin notecognito-ipc-server');
-  } finally {
-    client.close();
-    process.exit(0);
-  }
-}
-
-// Run the tests
-runTests();
+client.on('error', (err) => {
+  console.error('Socket error:', err);
+});

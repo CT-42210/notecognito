@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Notecognito Configuration</title>
+  <link href="node_modules/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="node_modules/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body {
+      background-color: #f8f9fa;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+
+    .container-fluid {
+      -webkit-app-region: no-drag;
+    }
+
+    .notecard-button {
+      width: 60px;
+      height: 60px;
+      font-size: 1.5rem;
+      font-weight: bold;
+      margin: 5px;
+      transition: all 0.2s;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .notecard-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    }
+
+    .notecard-button.active {
+      background-color: #0d6efd;
+      color: white;
+      border-color: #0d6efd;
+    }
+
+    .notecard-content {
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      min-height: 300px;
+      background-color: white;
+      border: 1px solid #dee2e6;
+      border-radius: 0.375rem;
+      padding: 1rem;
+    }
+
+    .settings-section {
+      background-color: white;
+      border-radius: 0.5rem;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .opacity-preview {
+      width: 100%;
+      height: 40px;
+      background: linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%, #ccc),
+                  linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%, #ccc);
+      background-size: 20px 20px;
+      background-position: 0 0, 10px 10px;
+      position: relative;
+      border-radius: 0.25rem;
+      overflow: hidden;
+    }
+
+    .opacity-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+      transition: opacity 0.2s;
+    }
+
+    .status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 0.5rem;
+    }
+
+    .status-indicator.connected {
+      background-color: #28a745;
+    }
+
+    .status-indicator.disconnected {
+      background-color: #dc3545;
+    }
+
+    .hotkey-display {
+      font-family: 'SF Mono', Monaco, monospace;
+      background-color: #e9ecef;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      font-size: 0.9rem;
+    }
+
+    /* macOS specific styles */
+    .platform-darwin .window-controls {
+      padding-top: 28px;
+    }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+
+    .toast-container {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 10000;
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="text-center">
+      <div class="spinner-border text-light" role="status">
+        <span class="visually-hidden">Loading...</span>
+      </div>
+      <div class="text-light mt-2">Connecting to Notecognito service...</div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Main Container -->
+  <div class="container-fluid py-4">
+    <div class="row">
+      <div class="col-12">
+        <!-- Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+          <div>
+            <h1 class="h3 mb-0">
+              <i class="bi bi-sticky-fill text-primary me-2"></i>
+              Notecognito Configuration
+            </h1>
+            <small class="text-muted">
+              <span id="connectionStatus" class="status-indicator disconnected"></span>
+              <span id="connectionText">Disconnected</span>
+            </small>
+          </div>
+          <button id="saveBtn" class="btn btn-primary" disabled>
+            <i class="bi bi-save me-1"></i> Save All
+          </button>
+        </div>
+
+        <div class="row">
+          <!-- Notecard Selection -->
+          <div class="col-lg-3 mb-4">
+            <div class="settings-section">
+              <h5 class="mb-3">Notecards</h5>
+              <div class="d-flex flex-wrap justify-content-center" id="notecardButtons">
+                <!-- Buttons will be generated here -->
+              </div>
+              <div class="mt-3 text-center">
+                <small class="text-muted">Press <span class="hotkey-display" id="hotkeyDisplay">Ctrl+Shift+[1-9]</span> to show</small>
+              </div>
+            </div>
+
+            <!-- Global Settings -->
+            <div class="settings-section">
+              <h5 class="mb-3">Global Settings</h5>
+
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="launchOnStartup">
+                <label class="form-check-label" for="launchOnStartup">
+                  Launch on startup
+                </label>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Hotkey Combination</label>
+                <select class="form-select" id="hotkeyModifiers" multiple size="3">
+                  <option value="Control">Control</option>
+                  <option value="Alt">Alt</option>
+                  <option value="Shift">Shift</option>
+                </select>
+                <small class="text-muted">Hold Ctrl/Cmd to select multiple</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Notecard Editor -->
+          <div class="col-lg-9">
+            <div class="settings-section">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">Notecard <span id="currentNotecardId">1</span></h5>
+                <button id="clearBtn" class="btn btn-sm btn-outline-danger">
+                  <i class="bi bi-trash"></i> Clear
+                </button>
+              </div>
+
+              <div class="mb-3">
+                <label for="notecardContent" class="form-label">Content</label>
+                <textarea
+                  class="form-control notecard-content"
+                  id="notecardContent"
+                  placeholder="Enter your notecard content here..."
+                  spellcheck="false"
+                ></textarea>
+                <div class="form-text">
+                  <span id="charCount">0</span> / 10000 characters
+                </div>
+              </div>
+
+              <!-- Display Settings -->
+              <h6 class="mb-3">Display Settings</h6>
+
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label for="opacity" class="form-label">
+                    Opacity: <span id="opacityValue">95</span>%
+                  </label>
+                  <input type="range" class="form-range" id="opacity" min="20" max="100" value="95">
+                  <div class="opacity-preview mt-2">
+                    <div class="opacity-overlay" id="opacityPreview">Preview Text</div>
+                  </div>
+                </div>
+
+                <div class="col-md-6">
+                  <label for="fontSize" class="form-label">
+                    Font Size: <span id="fontSizeValue">16</span>pt
+                  </label>
+                  <input type="range" class="form-range" id="fontSize" min="10" max="36" value="16">
+                </div>
+
+                <div class="col-md-6">
+                  <label for="autoHide" class="form-label">
+                    Auto-hide: <span id="autoHideValue">Disabled</span>
+                  </label>
+                  <input type="range" class="form-range" id="autoHide" min="0" max="30" value="0">
+                  <small class="text-muted">0 = manual dismiss, 1-30 = seconds</small>
+                </div>
+
+                <div class="col-md-6">
+                  <label for="fontFamily" class="form-label">Font Family</label>
+                  <select class="form-select" id="fontFamily">
+                    <option value="System">System Default</option>
+                    <option value="Arial">Arial</option>
+                    <option value="Helvetica">Helvetica</option>
+                    <option value="Times New Roman">Times New Roman</option>
+                    <option value="Georgia">Georgia</option>
+                    <option value="Courier New">Courier New</option>
+                    <option value="Monaco">Monaco</option>
+                    <option value="SF Pro">SF Pro (macOS)</option>
+                    <option value="Segoe UI">Segoe UI (Windows)</option>
+                  </select>
+                </div>
+
+                <div class="col-12">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="algorithmicSpacing">
+                    <label class="form-check-label" for="algorithmicSpacing">
+                      Enable algorithmic spacing
+                      <i class="bi bi-question-circle text-muted"
+                         data-bs-toggle="tooltip"
+                         title="Adjusts character spacing for better readability"></i>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- About Modal -->
+  <div class="modal fade" id="aboutModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">
+            <i class="bi bi-sticky-fill text-primary me-2"></i>
+            About Notecognito
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p><strong>Notecognito</strong> is a cross-platform notecard display system designed for rapid information retrieval.</p>
+          <p>Version: 0.1.0</p>
+          <hr>
+          <p class="mb-0 text-muted">Press <kbd>Ctrl/Cmd + Shift + [1-9]</kbd> to display your notecards.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
