@@ -230,8 +230,7 @@ impl App {
             let menu = NSMenu::new(mtm);
 
             // Get delegate reference
-            let delegate = unsafe { MENU_DELEGATE.as_ref().unwrap() };
-
+            let delegate = MENU_DELEGATE.as_ref().unwrap();
             // Configure item
             let configure_item = NSMenuItem::new(mtm);
             configure_item.setTitle(&NSString::from_str("Configure..."));

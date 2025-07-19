@@ -4,6 +4,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use objc2::msg_send; // Add this import for msg_send macro
 use dispatch::Queue;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex as StdMutex;
+use objc2_app_kit::NSWindow;
+use objc2::rc::Retained;
+
+// Global window storage
+static ACTIVE_WINDOWS: Lazy<StdMutex<HashMap<u8, Retained<NSWindow>>>> = Lazy::new(|| {
+    StdMutex::new(HashMap::new())
+});
 
 // Simple window info structure
 #[derive(Clone)]
@@ -58,7 +68,16 @@ impl NotecardWindowManager {
         let mut pending = self.pending_windows.lock().await;
         pending.retain(|w| w.notecard_id != notecard_id);
 
-        // In a real implementation, we would close the window here
+        // Close the window on the main thread
+        let notecard_id_value = notecard_id.value();
+        Queue::main().exec_async(move || {
+            let mut windows = ACTIVE_WINDOWS.lock().unwrap();
+            if let Some(window) = windows.remove(&notecard_id_value) {
+                window.close();
+                tracing::info!("Notecard {} window closed", notecard_id_value);
+            }
+        });
+
         Ok(())
     }
 
@@ -79,7 +98,6 @@ impl NotecardWindowManager {
         let font_size = properties.font_size;
         let position = properties.position;
         let size = properties.size;
-        let auto_hide_duration = properties.auto_hide_duration;
 
         // Dispatch to main queue
         Queue::main().exec_async(move || {
@@ -150,27 +168,16 @@ impl NotecardWindowManager {
                 // Add text field to window
                 content_view.addSubview(&text_field);
 
+                // Store window for later access
+                {
+                    let mut windows = ACTIVE_WINDOWS.lock().unwrap();
+                    windows.insert(notecard_id.value(), window.clone());
+                }
+
                 // Show window
                 window.makeKeyAndOrderFront(None);
 
                 tracing::info!("Notecard {} window displayed", notecard_id.value());
-
-                // Auto-hide timer if configured
-                if auto_hide_duration > 0 {
-                    let duration_secs = auto_hide_duration;
-
-                    // Use a simple dispatch_after approach
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(duration_secs as u64));
-
-                        // Dispatch back to main queue to close window
-                        Queue::main().exec_async(move || {
-                            window.close();
-                            tracing::info!("Notecard {} auto-hidden after {} seconds",
-                                      notecard_id.value(), duration_secs);
-                        });
-                    });
-                }
             }
         });
 
