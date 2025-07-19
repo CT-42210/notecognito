@@ -60,7 +60,6 @@ impl NotecardWindowManager {
         Queue::main().exec_async(move || {
             let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
             if let Some(window_number) = window_ids.remove(&notecard_id_value) {
-                // Find and close the window using NSApp
                 unsafe {
                     use objc2_app_kit::NSApplication;
                     use objc2_foundation::MainThreadMarker;
@@ -94,9 +93,11 @@ impl NotecardWindowManager {
     ) -> Result<()> {
         use objc2_app_kit::{
             NSBackingStoreType, NSColor, NSFont, NSTextField, NSWindow,
-            NSWindowStyleMask,
+            NSWindowStyleMask, NSEvent, NSEventType, NSEventMask,
         };
         use objc2_foundation::{CGFloat, CGPoint, CGRect, CGSize, MainThreadMarker, NSString};
+        use block2::ConcreteBlock;
+        use std::ptr::NonNull;
 
         let content = content.to_string();
         let opacity = properties.opacity;
@@ -123,7 +124,7 @@ impl NotecardWindowManager {
                 let window = NSWindow::initWithContentRect_styleMask_backing_defer(
                     mtm.alloc::<NSWindow>(),
                     frame,
-                    NSWindowStyleMask::Borderless, // Remove NonactivatingPanel
+                    NSWindowStyleMask::Borderless,
                     NSBackingStoreType::NSBackingStoreBuffered,
                     false,
                 );
@@ -134,6 +135,7 @@ impl NotecardWindowManager {
                 window.setAlphaValue(opacity as CGFloat / 100.0);
                 window.setHasShadow(true);
                 window.setIgnoresMouseEvents(false);
+                window.setAcceptsMouseMovedEvents(true);
 
                 let content_view = window.contentView().unwrap();
                 let bg_color = NSColor::colorWithWhite_alpha(0.1, 0.9);
@@ -142,7 +144,6 @@ impl NotecardWindowManager {
                 if let Some(layer) = content_view.layer() {
                     let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
                 }
-                // Set background color directly on the content view
                 let _: () = msg_send![&content_view, setBackgroundColor: &*bg_color];
 
                 let text_field = NSTextField::new(mtm);
@@ -163,15 +164,82 @@ impl NotecardWindowManager {
 
                 content_view.addSubview(&text_field);
 
-                // Store window number instead of window object
+                // Store window number
                 let window_number: i64 = msg_send![&window, windowNumber];
                 {
                     let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
                     window_ids.insert(notecard_id_value, window_number);
                 }
 
-                window.makeKeyAndOrderFront(None);
+                // Create event handler - remove Self:: calls and inline the logic
+                let handler = ConcreteBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+                    let event = unsafe { event.as_ref() };
+                    let event_type = event.r#type();
 
+                    if event_type == NSEventType::KeyDown {
+                        let key_code = event.keyCode();
+                        if key_code == 53 { // Escape key
+                            // Inline window closing logic
+                            if let Some(mtm) = MainThreadMarker::new() {
+                                unsafe {
+                                    if let Some(window) = event.window(mtm) {
+                                        let window_num: i64 = msg_send![&window, windowNumber];
+
+                                        // Remove from tracking
+                                        let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
+                                        let notecard_to_remove = window_ids.iter()
+                                            .find_map(|(id, &win_num)| if win_num == window_num { Some(*id) } else { None });
+
+                                        if let Some(notecard_id) = notecard_to_remove {
+                                            window_ids.remove(&notecard_id);
+                                        }
+                                        drop(window_ids);
+
+                                        // Close the window
+                                        let _: () = msg_send![&window, close];
+                                    }
+                                }
+                            }
+                            return std::ptr::null_mut();
+                        }
+                    } else if event_type == NSEventType::LeftMouseDown {
+                        // Inline window closing logic for mouse click
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            unsafe {
+                                if let Some(window) = event.window(mtm) {
+                                    let window_num: i64 = msg_send![&window, windowNumber];
+
+                                    // Remove from tracking
+                                    let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
+                                    let notecard_to_remove = window_ids.iter()
+                                        .find_map(|(id, &win_num)| if win_num == window_num { Some(*id) } else { None });
+
+                                    if let Some(notecard_id) = notecard_to_remove {
+                                        window_ids.remove(&notecard_id);
+                                    }
+                                    drop(window_ids);
+
+                                    // Close the window
+                                    let _: () = msg_send![&window, close];
+                                }
+                            }
+                        }
+                        return std::ptr::null_mut();
+                    }
+
+                    // Return the event pointer correctly
+                    event as *const NSEvent as *mut NSEvent
+                });
+
+                let handler = handler.copy();
+
+                let event_mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown;
+                let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                    event_mask,
+                    &handler,
+                );
+
+                window.makeKeyAndOrderFront(None);
                 tracing::info!("Notecard {} window displayed", notecard_id_value);
             }
         });
