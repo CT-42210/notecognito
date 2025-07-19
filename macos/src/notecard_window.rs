@@ -64,13 +64,13 @@ impl NotecardWindowManager {
 
     fn create_window_on_main_thread(
         &self,
-        notecard_id: NotecardId,  // Remove underscore to use this parameter
+        notecard_id: NotecardId,
         content: &str,
         properties: &DisplayProperties,
     ) -> Result<()> {
         use objc2_app_kit::{
             NSBackingStoreType, NSColor, NSFont, NSTextField, NSWindow,
-            NSWindowStyleMask, NSWindowLevel,
+            NSWindowStyleMask,
         };
         use objc2_foundation::{CGFloat, CGPoint, CGRect, CGSize, MainThreadMarker, NSString};
 
@@ -79,6 +79,7 @@ impl NotecardWindowManager {
         let font_size = properties.font_size;
         let position = properties.position;
         let size = properties.size;
+        let auto_hide_duration = properties.auto_hide_duration;
 
         // Dispatch to main queue
         Queue::main().exec_async(move || {
@@ -108,9 +109,8 @@ impl NotecardWindowManager {
                 );
 
                 // Configure window
-                // Use proper window level constant
-                let floating_window_level = 3i64; // NSFloatingWindowLevel
-                window.setLevel(NSWindowLevel(floating_window_level));
+                // Set floating window level
+                let _: () = msg_send![&window, setLevel: 3i64]; // NSFloatingWindowLevel
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
                 window.setAlphaValue(opacity as CGFloat / 100.0);
@@ -150,26 +150,26 @@ impl NotecardWindowManager {
                 // Add text field to window
                 content_view.addSubview(&text_field);
 
-                // Add click handler to dismiss window
-                // For now, we'll make the window close when clicked
-                // In a full implementation, you'd store the window reference and handle this properly
-
                 // Show window
                 window.makeKeyAndOrderFront(None);
 
                 tracing::info!("Notecard {} window displayed", notecard_id.value());
 
                 // Auto-hide timer if configured
-                if properties.auto_hide_duration > 0 {
-                    let duration = properties.auto_hide_duration as f64;
-                    dispatch::Queue::main().exec_after(
-                        dispatch::time::now() + duration,
-                        move || {
+                if auto_hide_duration > 0 {
+                    let duration_secs = auto_hide_duration;
+
+                    // Use a simple dispatch_after approach
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(duration_secs as u64));
+
+                        // Dispatch back to main queue to close window
+                        Queue::main().exec_async(move || {
                             window.close();
                             tracing::info!("Notecard {} auto-hidden after {} seconds",
-                                      notecard_id.value(), duration);
-                        }
-                    );
+                                      notecard_id.value(), duration_secs);
+                        });
+                    });
                 }
             }
         });

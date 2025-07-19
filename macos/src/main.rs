@@ -345,7 +345,7 @@ impl App {
 async fn show_notecard(
     notecard_id: NotecardId,
     config_manager: Arc<Mutex<ConfigManager>>,
-    window_manager: Arc<Mutex<NotecardWindowManager>>,  // Remove the underscore
+    window_manager: Arc<Mutex<NotecardWindowManager>>,  // No underscore!
 ) -> Result<()> {
     let manager = config_manager.lock().await;
 
@@ -353,7 +353,7 @@ async fn show_notecard(
         if !notecard.content.is_empty() {
             let properties = &manager.config().default_display_properties;
 
-            // Now actually show the notecard window
+            // Actually show the notecard window
             let mut window_manager = window_manager.lock().await;
             window_manager.show_notecard(notecard_id, &notecard.content, properties).await?;
         }
