@@ -2,18 +2,14 @@ use anyhow::Result;
 use notecognito_core::{DisplayProperties, NotecardId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use objc2::msg_send; // Add this import for msg_send macro
+use objc2::msg_send;
 use dispatch::Queue;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
-use objc2_app_kit::NSWindow;
-use objc2::rc::Retained;
 
-// Global window storage
-static ACTIVE_WINDOWS: Lazy<StdMutex<HashMap<u8, Retained<NSWindow>>>> = Lazy::new(|| {
-    StdMutex::new(HashMap::new())
-});
+// Store only window IDs that can be used to find windows later
+static ACTIVE_WINDOW_IDS: once_cell::sync::Lazy<StdMutex<HashMap<u8, i64>>> =
+    once_cell::sync::Lazy::new(|| StdMutex::new(HashMap::new()));
 
 // Simple window info structure
 #[derive(Clone)]
@@ -24,7 +20,6 @@ pub struct NotecardWindowInfo {
 }
 
 pub struct NotecardWindowManager {
-    // Store window info for display on the main thread
     pending_windows: Arc<Mutex<Vec<NotecardWindowInfo>>>,
 }
 
@@ -44,36 +39,46 @@ impl NotecardWindowManager {
         content: &str,
         properties: &DisplayProperties,
     ) -> Result<()> {
-        // For now, just store the window info
-        // The actual window creation needs to happen on the main thread
         let window_info = NotecardWindowInfo {
             notecard_id,
             content: content.to_string(),
             properties: properties.clone(),
         };
 
-        // Add to pending windows
         let mut pending = self.pending_windows.lock().await;
         pending.push(window_info);
 
-        // In a real implementation, we would signal the main thread to create the window
-        // For now, let's use dispatch to create a basic window
         self.create_window_on_main_thread(notecard_id, content, properties)?;
-
         Ok(())
     }
 
     pub async fn hide_notecard(&mut self, notecard_id: NotecardId) -> Result<()> {
-        // Remove from pending if exists
         let mut pending = self.pending_windows.lock().await;
         pending.retain(|w| w.notecard_id != notecard_id);
 
-        // Close the window on the main thread
         let notecard_id_value = notecard_id.value();
         Queue::main().exec_async(move || {
-            let mut windows = ACTIVE_WINDOWS.lock().unwrap();
-            if let Some(window) = windows.remove(&notecard_id_value) {
-                window.close();
+            let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
+            if let Some(window_number) = window_ids.remove(&notecard_id_value) {
+                // Find and close the window using NSApp
+                unsafe {
+                    use objc2_app_kit::NSApplication;
+                    use objc2_foundation::MainThreadMarker;
+
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        let app = NSApplication::sharedApplication(mtm);
+                        let windows = app.windows();
+
+                        for i in 0..windows.count() {
+                            let window = windows.objectAtIndex(i);
+                            let window_num: i64 = msg_send![&window, windowNumber];
+                            if window_num == window_number {
+                                let _: () = msg_send![&window, close];
+                                break;
+                            }
+                        }
+                    }
+                }
                 tracing::info!("Notecard {} window closed", notecard_id_value);
             }
         });
@@ -98,11 +103,10 @@ impl NotecardWindowManager {
         let font_size = properties.font_size;
         let position = properties.position;
         let size = properties.size;
+        let notecard_id_value = notecard_id.value();
 
-        // Dispatch to main queue
         Queue::main().exec_async(move || {
             unsafe {
-                // Try to get main thread marker
                 let mtm = match MainThreadMarker::new() {
                     Some(m) => m,
                     None => {
@@ -111,42 +115,36 @@ impl NotecardWindowManager {
                     }
                 };
 
-                // Create window frame with user-specified position and size
                 let frame = CGRect::new(
                     CGPoint::new(position.0 as CGFloat, position.1 as CGFloat),
                     CGSize::new(size.0 as CGFloat, size.1 as CGFloat),
                 );
 
-                // Create window
                 let window = NSWindow::initWithContentRect_styleMask_backing_defer(
                     mtm.alloc::<NSWindow>(),
                     frame,
-                    NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                    NSWindowStyleMask::Borderless, // Remove NonactivatingPanel
                     NSBackingStoreType::NSBackingStoreBuffered,
                     false,
                 );
 
-                // Configure window
-                // Set floating window level
-                let _: () = msg_send![&window, setLevel: 3i64]; // NSFloatingWindowLevel
+                let _: () = msg_send![&window, setLevel: 3i64];
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
                 window.setAlphaValue(opacity as CGFloat / 100.0);
                 window.setHasShadow(true);
-                window.setIgnoresMouseEvents(false); // Allow clicks to dismiss
+                window.setIgnoresMouseEvents(false);
 
-                // Create background view
                 let content_view = window.contentView().unwrap();
                 let bg_color = NSColor::colorWithWhite_alpha(0.1, 0.9);
                 content_view.setWantsLayer(true);
 
                 if let Some(layer) = content_view.layer() {
-                    let cg_color: *const std::ffi::c_void = msg_send![&bg_color, CGColor];
-                    let _: () = msg_send![&layer, setBackgroundColor: cg_color];
                     let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
                 }
+                // Set background color directly on the content view
+                let _: () = msg_send![&content_view, setBackgroundColor: &*bg_color];
 
-                // Create text field
                 let text_field = NSTextField::new(mtm);
                 text_field.setStringValue(&NSString::from_str(&content));
                 text_field.setEditable(false);
@@ -154,30 +152,27 @@ impl NotecardWindowManager {
                 text_field.setDrawsBackground(false);
                 text_field.setTextColor(Some(&NSColor::whiteColor()));
 
-                // Set font
                 let font = NSFont::systemFontOfSize(font_size as CGFloat);
                 text_field.setFont(Some(&font));
 
-                // Set frame for text field with padding
                 let text_frame = CGRect::new(
                     CGPoint::new(20.0, 20.0),
                     CGSize::new(size.0 as CGFloat - 40.0, size.1 as CGFloat - 40.0),
                 );
                 text_field.setFrame(text_frame);
 
-                // Add text field to window
                 content_view.addSubview(&text_field);
 
-                // Store window for later access
+                // Store window number instead of window object
+                let window_number: i64 = msg_send![&window, windowNumber];
                 {
-                    let mut windows = ACTIVE_WINDOWS.lock().unwrap();
-                    windows.insert(notecard_id.value(), window.clone());
+                    let mut window_ids = ACTIVE_WINDOW_IDS.lock().unwrap();
+                    window_ids.insert(notecard_id_value, window_number);
                 }
 
-                // Show window
                 window.makeKeyAndOrderFront(None);
 
-                tracing::info!("Notecard {} window displayed", notecard_id.value());
+                tracing::info!("Notecard {} window displayed", notecard_id_value);
             }
         });
 
