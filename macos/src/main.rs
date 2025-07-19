@@ -82,9 +82,7 @@ impl App {
 
         // Set up as menu bar app (no dock icon)
         let app = NSApplication::sharedApplication(mtm);
-        unsafe {
-            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        }
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
         // Create and set app delegate FIRST
         let delegate = AppDelegate::new(mtm);
@@ -111,20 +109,21 @@ impl App {
             platform.initialize()?;
         }
 
-        // Check permissions
-        {
-            let platform = self.platform.lock().await;
-            if !platform.check_permissions()? {
-                tracing::warn!("Accessibility permissions not granted");
+        // Load configuration (but don't start hotkey monitoring yet)
+        self.load_configuration_without_hotkeys().await?;
+
+        // Now try to start hotkey monitoring, which will check permissions
+        if let Err(e) = self.setup_hotkeys().await {
+            tracing::warn!("Failed to setup hotkeys: {}", e);
+            // Show permission alert if it's a permission issue
+            if e.to_string().contains("Accessibility permissions") {
                 self.show_accessibility_alert(mtm);
             }
         }
 
-        // Load configuration and setup hotkeys
-        self.load_configuration().await?;
-
         Ok(())
     }
+
 
     fn show_accessibility_alert(&self, mtm: MainThreadMarker) {
         use objc2_app_kit::{NSAlert, NSAlertStyle};
@@ -156,31 +155,6 @@ impl App {
         Ok(())
     }
 
-    async fn load_configuration(&self) -> Result<()> {
-        let manager = self.config_manager.lock().await;
-        let config = manager.config();
-
-        // Register hotkeys for all notecards
-        let mut hotkey_manager = self.hotkey_manager.lock().await;
-        let modifiers = &config.hotkey_modifiers;
-
-        for i in 1..=9 {
-            let notecard_id = NotecardId::new(i)?;
-            if let Some(notecard) = manager.get_notecard(notecard_id) {
-                if !notecard.content.is_empty() {
-                    hotkey_manager.register_hotkey(notecard_id, modifiers)?;
-                }
-            }
-        }
-
-        // Set launch on startup
-        if config.launch_on_startup {
-            let mut platform = self.platform.lock().await;
-            platform.set_launch_on_startup(true)?;
-        }
-
-        Ok(())
-    }
 
     fn create_menu_bar_item(&mut self, mtm: MainThreadMarker) -> Result<()> {
         tracing::debug!("Creating menu bar item...");
@@ -217,7 +191,7 @@ impl App {
         Ok(())
     }
 
-    fn load_icon(mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
+    fn load_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
         unsafe {
             // Try multiple ways to load the icon
 
@@ -256,7 +230,7 @@ impl App {
             let menu = NSMenu::new(mtm);
 
             // Get delegate reference
-            let delegate = MENU_DELEGATE.as_ref().unwrap();
+            let delegate = unsafe { MENU_DELEGATE.as_ref().unwrap() };
 
             // Configure item
             let configure_item = NSMenuItem::new(mtm);
@@ -291,31 +265,79 @@ impl App {
     }
 
     async fn run(&mut self) -> Result<()> {
-        // Set up hotkey callback
-        let config_manager = Arc::clone(&self.config_manager);
-        let window_manager = Arc::clone(&self.window_manager);
+        // Create a channel for hotkey events
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<NotecardId>(32);
 
+        // Set up hotkey callback with channel sender
         let callback = move |notecard_id: NotecardId| {
             tracing::info!("Hotkey pressed for notecard {}", notecard_id.value());
 
-            let config_manager = Arc::clone(&config_manager);
-            let window_manager = Arc::clone(&window_manager);
-
-            // Show notecard in a separate task
-            tokio::spawn(async move {
-                if let Err(e) = show_notecard(notecard_id, config_manager, window_manager).await {
-                    tracing::error!("Failed to show notecard: {}", e);
-                }
-            });
+            // Just send the notecard ID through the channel
+            // This is safe to do from any thread
+            if let Err(e) = tx.try_send(notecard_id) {
+                tracing::error!("Failed to send hotkey event: {}", e);
+            }
         };
 
         // Start hotkey monitoring
         {
             let mut hotkey_manager = self.hotkey_manager.lock().await;
-            hotkey_manager.start_monitoring(callback)?;
+            match hotkey_manager.start_monitoring(callback) {
+                Ok(_) => {
+                    tracing::info!("Hotkey monitoring started successfully");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start hotkey monitoring: {}", e);
+                    // Don't return error - app can still run without hotkeys
+                }
+            }
         }
 
-        tracing::info!("Hotkey monitoring started");
+        // Spawn a task to handle hotkey events
+        let config_manager = Arc::clone(&self.config_manager);
+        let window_manager = Arc::clone(&self.window_manager);
+
+        tokio::spawn(async move {
+            while let Some(notecard_id) = rx.recv().await {
+                if let Err(e) = show_notecard(notecard_id, config_manager.clone(), window_manager.clone()).await {
+                    tracing::error!("Failed to show notecard: {}", e);
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn load_configuration_without_hotkeys(&self) -> Result<()> {
+        let manager = self.config_manager.lock().await;
+        let config = manager.config();
+
+        // Set launch on startup
+        if config.launch_on_startup {
+            let mut platform = self.platform.lock().await;
+            platform.set_launch_on_startup(true)?;
+        }
+
+        Ok(())
+    }
+
+    async fn setup_hotkeys(&self) -> Result<()> {
+        let manager = self.config_manager.lock().await;
+        let config = manager.config();
+
+        // Register hotkeys for all notecards
+        let mut hotkey_manager = self.hotkey_manager.lock().await;
+        let modifiers = &config.hotkey_modifiers;
+
+        for i in 1..=9 {
+            let notecard_id = NotecardId::new(i)?;
+            if let Some(notecard) = manager.get_notecard(notecard_id) {
+                if !notecard.content.is_empty() {
+                    hotkey_manager.register_hotkey(notecard_id, modifiers)?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -323,20 +345,17 @@ impl App {
 async fn show_notecard(
     notecard_id: NotecardId,
     config_manager: Arc<Mutex<ConfigManager>>,
-    _window_manager: Arc<Mutex<NotecardWindowManager>>,
+    window_manager: Arc<Mutex<NotecardWindowManager>>,  // Remove the underscore
 ) -> Result<()> {
     let manager = config_manager.lock().await;
 
     if let Some(notecard) = manager.get_notecard(notecard_id) {
         if !notecard.content.is_empty() {
-            let _properties = &manager.config().default_display_properties;
+            let properties = &manager.config().default_display_properties;
 
-            // For now, just log that we would show the notecard
-            tracing::info!("Would show notecard {}: {}", notecard_id.value(), notecard.content);
-
-            // TODO: Implement actual window display
-            // let mut window_manager = window_manager.lock().await;
-            // window_manager.show_notecard(notecard_id, &notecard.content, properties)?;
+            // Now actually show the notecard window
+            let mut window_manager = window_manager.lock().await;
+            window_manager.show_notecard(notecard_id, &notecard.content, properties).await?;
         }
     }
 
@@ -398,8 +417,11 @@ async fn main() -> Result<()> {
     // Initialize on main thread
     app.initialize(mtm).await?;
 
-    // Start async tasks
-    app.run().await?;
+    // Start async tasks (but don't fail if hotkeys can't be registered)
+    if let Err(e) = app.run().await {
+        tracing::error!("Error during app run: {}", e);
+        // Continue anyway - the app can still function
+    }
 
     // Run the main event loop
     unsafe {

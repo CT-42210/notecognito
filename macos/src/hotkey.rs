@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use core_foundation::runloop::{CFRunLoop, CFRunLoopMode};
+use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventType, EventField,
@@ -26,6 +26,7 @@ struct HotkeyState {
 
 pub struct HotkeyManager {
     monitoring: Arc<Mutex<bool>>,
+    event_tap_thread: Option<thread::JoinHandle<()>>,
 }
 
 unsafe impl Send for HotkeyManager {}
@@ -35,6 +36,7 @@ impl HotkeyManager {
     pub fn new() -> Self {
         HotkeyManager {
             monitoring: Arc::new(Mutex::new(false)),
+            event_tap_thread: None,
         }
     }
 
@@ -79,6 +81,11 @@ impl HotkeyManager {
             }
         }
 
+        // Check accessibility permissions first
+        if !Self::check_accessibility_permissions() {
+            return Err(anyhow!("Accessibility permissions not granted. Please grant permissions in System Preferences > Security & Privacy > Privacy > Accessibility"));
+        }
+
         // Store callback in global state
         {
             let mut state = HOTKEY_STATE.lock().unwrap();
@@ -88,45 +95,81 @@ impl HotkeyManager {
         let monitoring = Arc::clone(&self.monitoring);
 
         // Start event tap in a separate thread
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             if let Err(e) = Self::run_event_tap(monitoring) {
                 tracing::error!("Event tap error: {}", e);
             }
         });
 
+        self.event_tap_thread = Some(handle);
+
         Ok(())
     }
 
+    fn check_accessibility_permissions() -> bool {
+        use core_foundation::base::{Boolean, TCFType};
+        use core_foundation::dictionary::CFDictionary;
+        use core_foundation::string::CFString;
+
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef) -> Boolean;
+        }
+
+        unsafe {
+            // Create options dictionary to prompt if needed
+            let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+            let value = core_foundation::boolean::CFBoolean::true_value();
+
+            let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0
+        }
+    }
+
     fn run_event_tap(monitoring: Arc<Mutex<bool>>) -> Result<()> {
-        // Create event tap
-        let tap = CGEventTap::new(
+        tracing::debug!("Creating event tap...");
+
+        // Create event tap with proper error handling
+        let tap_result = CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::Default,
             vec![CGEventType::KeyDown],
             |_proxy, event_type, event| {
+                // Only process KeyDown events
                 match event_type {
                     CGEventType::KeyDown => {
-                        // Your existing logic here
+                        // Check if this matches any registered hotkey
+                        if let Some(notecard_id) = Self::check_hotkey(&event) {
+                            tracing::debug!("Hotkey matched for notecard {}", notecard_id.value());
+
+                            // Call the callback
+                            if let Ok(state) = HOTKEY_STATE.lock() {
+                                if let Some(ref cb) = state.callback {
+                                    cb(notecard_id);
+                                }
+                            }
+
+                            // Consume the event (prevent it from propagating)
+                            return None;
+                        }
                     }
-                    _ => return Some(event.clone()),
+                    _ => {}
                 }
 
-                // Check if this matches any registered hotkey
-                if let Some(notecard_id) = Self::check_hotkey(&event) {
-                    // Call the callback
-                    let state = HOTKEY_STATE.lock().unwrap();
-                    if let Some(ref cb) = state.callback {
-                        cb(notecard_id);
-                    }
-
-                    // Consume the event
-                    return None;
-                }
-
+                // Let the event pass through
                 Some(event.clone())
             },
-        ).map_err(|_| anyhow!("Failed to create event tap"))?;
+        );
+
+        let tap = match tap_result {
+            Ok(tap) => tap,
+            Err(e) => {
+                tracing::error!("Failed to create event tap: {:?}", e);
+                return Err(anyhow!("Failed to create event tap. Make sure accessibility permissions are granted."));
+            }
+        };
 
         // Enable the tap
         tap.enable();
@@ -140,18 +183,24 @@ impl HotkeyManager {
         tracing::info!("Event tap created and enabled, starting run loop");
 
         // Run the current thread's run loop
+        let tap_source = tap.mach_port.create_runloop_source(0)
+            .map_err(|_| anyhow!("Failed to create run loop source"))?;
+
         let run_loop = CFRunLoop::get_current();
         unsafe {
-            let tap_source = tap.mach_port.create_runloop_source(0).unwrap();
-            run_loop.add_source(&tap_source, CFRunLoopMode::default());
-            CFRunLoop::run_current();
+            run_loop.add_source(&tap_source, kCFRunLoopCommonModes);
         }
 
-        // Update monitoring status
+        // Run the loop
+        CFRunLoop::run_current();
+
+        // Update monitoring status when done
         {
             let mut mon = monitoring.lock().unwrap();
             *mon = false;
         }
+
+        tracing::info!("Event tap run loop ended");
 
         Ok(())
     }
@@ -181,10 +230,15 @@ impl HotkeyManager {
         };
 
         // Check if this notecard has registered hotkeys
-        let state = HOTKEY_STATE.lock().unwrap();
+        let state = match HOTKEY_STATE.lock() {
+            Ok(state) => state,
+            Err(_) => return None,
+        };
+
         if let Some(required_modifiers) = state.hotkeys.get(&notecard_id) {
             // Check if all required modifiers are pressed
             if Self::check_modifiers(&flags, required_modifiers) {
+                tracing::debug!("Hotkey match found for notecard {}", notecard_id.value());
                 return Some(notecard_id);
             }
         }
@@ -214,7 +268,13 @@ impl HotkeyManager {
         let mut monitoring = self.monitoring.lock().unwrap();
         *monitoring = false;
 
-        // The run loop will exit on its own
+        // Stop the run loop
+        CFRunLoop::get_current().stop();
+
+        // Wait for thread to finish
+        if let Some(handle) = self.event_tap_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 

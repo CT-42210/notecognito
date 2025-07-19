@@ -64,19 +64,21 @@ impl NotecardWindowManager {
 
     fn create_window_on_main_thread(
         &self,
-        notecard_id: NotecardId,
+        notecard_id: NotecardId,  // Remove underscore to use this parameter
         content: &str,
         properties: &DisplayProperties,
     ) -> Result<()> {
         use objc2_app_kit::{
             NSBackingStoreType, NSColor, NSFont, NSTextField, NSWindow,
-            NSWindowStyleMask,
+            NSWindowStyleMask, NSWindowLevel,
         };
         use objc2_foundation::{CGFloat, CGPoint, CGRect, CGSize, MainThreadMarker, NSString};
 
         let content = content.to_string();
         let opacity = properties.opacity;
         let font_size = properties.font_size;
+        let position = properties.position;
+        let size = properties.size;
 
         // Dispatch to main queue
         Queue::main().exec_async(move || {
@@ -90,27 +92,30 @@ impl NotecardWindowManager {
                     }
                 };
 
-                // Create window frame
+                // Create window frame with user-specified position and size
                 let frame = CGRect::new(
-                    CGPoint::new(200.0, 200.0),
-                    CGSize::new(400.0, 200.0),
+                    CGPoint::new(position.0 as CGFloat, position.1 as CGFloat),
+                    CGSize::new(size.0 as CGFloat, size.1 as CGFloat),
                 );
 
                 // Create window
                 let window = NSWindow::initWithContentRect_styleMask_backing_defer(
                     mtm.alloc::<NSWindow>(),
                     frame,
-                    NSWindowStyleMask::Borderless,
+                    NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
                     NSBackingStoreType::NSBackingStoreBuffered,
                     false,
                 );
 
                 // Configure window
-                window.setLevel(3); // Floating window level
+                // Use proper window level constant
+                let floating_window_level = 3i64; // NSFloatingWindowLevel
+                window.setLevel(NSWindowLevel(floating_window_level));
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
                 window.setAlphaValue(opacity as CGFloat / 100.0);
                 window.setHasShadow(true);
+                window.setIgnoresMouseEvents(false); // Allow clicks to dismiss
 
                 // Create background view
                 let content_view = window.contentView().unwrap();
@@ -118,7 +123,7 @@ impl NotecardWindowManager {
                 content_view.setWantsLayer(true);
 
                 if let Some(layer) = content_view.layer() {
-                    let cg_color: *const std::ffi::c_void = unsafe { msg_send![&bg_color, CGColor] };
+                    let cg_color: *const std::ffi::c_void = msg_send![&bg_color, CGColor];
                     let _: () = msg_send![&layer, setBackgroundColor: cg_color];
                     let _: () = msg_send![&layer, setCornerRadius: 10.0f64];
                 }
@@ -138,17 +143,34 @@ impl NotecardWindowManager {
                 // Set frame for text field with padding
                 let text_frame = CGRect::new(
                     CGPoint::new(20.0, 20.0),
-                    CGSize::new(360.0, 160.0),
+                    CGSize::new(size.0 as CGFloat - 40.0, size.1 as CGFloat - 40.0),
                 );
                 text_field.setFrame(text_frame);
 
                 // Add text field to window
                 content_view.addSubview(&text_field);
 
+                // Add click handler to dismiss window
+                // For now, we'll make the window close when clicked
+                // In a full implementation, you'd store the window reference and handle this properly
+
                 // Show window
                 window.makeKeyAndOrderFront(None);
 
-                // Timer functionality removed - windows will stay open until manually closed
+                tracing::info!("Notecard {} window displayed", notecard_id.value());
+
+                // Auto-hide timer if configured
+                if properties.auto_hide_duration > 0 {
+                    let duration = properties.auto_hide_duration as f64;
+                    dispatch::Queue::main().exec_after(
+                        dispatch::time::now() + duration,
+                        move || {
+                            window.close();
+                            tracing::info!("Notecard {} auto-hidden after {} seconds",
+                                      notecard_id.value(), duration);
+                        }
+                    );
+                }
             }
         });
 
